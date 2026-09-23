@@ -1,0 +1,46 @@
+name: Build armiumOS
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      - name: Install Build Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential git libncurses5-dev rsync bc unzip cpio python3 wget file
+
+      - name: Build armiumOS with Buildroot
+        run: |
+          git clone --depth 1 -b 2024.02.x https://github.com/buildroot/buildroot.git
+          cd buildroot
+          make qemu_aarch64_virt_defconfig
+          
+          OVERLAY="board/qemu/aarch64-virt/rootfs-overlay"
+          mkdir -p $OVERLAY/usr/bin/ $OVERLAY/etc/init.d/ $OVERLAY/etc/xdg/weston/ $OVERLAY/usr/share/backgrounds/
+          
+          cp ../armiumos_av_guard.py $OVERLAY/usr/bin/
+          cp ../S99armiumos $OVERLAY/etc/init.d/
+          cp ../weston.ini $OVERLAY/etc/xdg/weston/
+          cp ../wallpaper.png $OVERLAY/usr/share/backgrounds/armiumos_wallpaper.png
+          
+          chmod +x $OVERLAY/etc/init.d/S99armiumos
+          chmod +x $OVERLAY/usr/bin/armiumos_av_guard.py
+          
+          make -j$(nproc)
+          
+          cp output/images/Image ../armiumos-kernel.bin
+          cp output/images/rootfs.ext2 ../armiumos-disk.img
+
+      - name: Upload armiumOS Binaries
+        uses: actions/upload-artifact@v3
+        with:
+          name: armiumOS-Files
+          path: |
+            armiumos-kernel.bin
+            armiumos-disk.img

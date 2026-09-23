@@ -1,0 +1,38 @@
+#!/bin/sh
+
+case "$1" in
+  start)
+    echo "=========================================="
+    echo "         Starting armiumOS v1.0           "
+    echo "=========================================="
+
+    mount -t proc proc /proc
+    mount -t sysfs sysfs /sys
+
+    ip link set dev eth0 up
+    udhcpc -i eth0
+
+    echo "[armiumOS] Starting Security Engine..."
+    python3 /usr/bin/armiumos_av_guard.py &
+
+    echo "[armiumOS] Initializing Display Compositor..."
+    weston --config=/etc/xdg/weston/weston.ini --backend=drm-backend.so &
+    sleep 2
+
+    echo "[armiumOS] Launching Interface..."
+    exec chromium-browser \
+      --no-sandbox \
+      --window-position=0,0 \
+      --user-data-dir=/root/chrome_data \
+      --download-default-directory=/root/Downloads \
+      "https://google.com"
+    ;;
+  stop)
+    killall chromium-browser
+    killall weston
+    killall python3
+    ;;
+  *)
+    echo "Usage: $0 {start|stop}"
+    exit 1
+esac
