@@ -1,0 +1,121 @@
+name: Build armiumOS (1.2GB Hybrid: Steam + Chrome + Settings)
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+jobs:
+  build-hybrid-armiumos:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Build Tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-user-static debootstrap e2fsprogs gdisk squashfs-tools dosfstools
+
+      - name: Create 1.2GB Disk Image
+        run: |
+          dd if=/dev/zero of=armiumos-disk.img bs=1M count=1200
+          
+          sgdisk -n 1:2048:+100M -t 1:ef00 armiumos-disk.img
+          sgdisk -n 2:0:0 -t 2:8300 armiumos-disk.img
+
+          LOOP=$(sudo losetup -fP --show armiumos-disk.img)
+          sudo mkfs.vfat -F32 ${LOOP}p1
+          sudo mkfs.ext4 ${LOOP}p2
+
+          mkdir -p mnt
+          sudo mount ${LOOP}p2 mnt/
+          sudo mkdir -p mnt/boot/efi
+          sudo mount ${LOOP}p1 mnt/boot/efi
+
+      - name: Build Full ARM64 RootFS (Primary System: Steam + Chrome + Settings)
+        run: |
+          sudo mkdir -p mnt/arm64
+          sudo debootstrap --variant=minbase --arch=arm64 bookworm mnt/arm64 http://deb.debian.org/debian/
+          sudo cp /usr/bin/qemu-aarch64-static mnt/arm64/usr/bin/
+
+          sudo chroot mnt/arm64 /bin/bash -c "
+            dpkg --add-architecture armhf
+            apt-get update
+            
+            # Install Chromium, Settings App (lxqt-config), Weston, Xwayland, and Steam base dependencies
+            apt-get install -y --no-install-recommends \
+              weston xwayland dbus libgl1-mesa-dri python3 chromium-browser lxqt-config wget curl git cmake build-essential \
+              libc6:armhf libstdc++6:armhf libgl1-mesa-glx:armhf
+            
+            # Install Box64 for Steam translation on ARM
+            git clone https://github.com/ptitSeb/box64.git /tmp/box64
+            cd /tmp/box64 && mkdir build && cd build
+            cmake .. -DARM_DYNAREC=ON -DCMAKE_BUILD_TYPE=Release -DBOX32=ON
+            make -j\$(nproc) && make install
+
+            # Install Steam client bootstrap
+            wget https://repo.steampowered.com/steam/archive/precise/steam_latest.deb -O /tmp/steam.deb
+            dpkg -i /tmp/steam.deb || apt-get install -f -y
+
+            apt-get clean
+            rm -rf /var/lib/apt/lists/* /tmp/*
+          "
+
+      - name: Build Super-Light x86_64 RootFS (Secondary Fallback)
+        run: |
+          sudo mkdir -p mnt/x86_64
+          sudo debootstrap --variant=minbase --arch=amd64 bookworm mnt/x86_64 http/deb.debian.org/debian/
+
+          sudo chroot mnt/x86_64 /bin/bash -c "
+            apt-get update
+            apt-get install -y --no-install-recommends \
+              weston dbus python3 chromium-browser lxqt-config wget
+            
+            apt-get clean
+            rm -rf /var/lib/apt/lists/* /tmp/*
+          "
+
+      - name: Inject Custom Brand & Assets
+        run: |
+          for ARCH in arm64 x86_64; do
+            sudo mkdir -p mnt/$ARCH/root mnt/$ARCH/etc/xdg/weston mnt/$ARCH/usr/share/backgrounds mnt/$ARCH/etc/init.d
+            sudo cp armiumos_av_guard.py mnt/$ARCH/root/ 2>/dev/null || true
+            sudo cp weston.ini mnt/$ARCH/etc/xdg/weston/ 2>/dev/null || true
+            sudo cp wallpaper.png mnt/$ARCH/usr/share/backgrounds/wallpaper.png 2>/dev/null || true
+            sudo cp S99armiumOS mnt/$ARCH/etc/init.d/ 2>/dev/null || true
+            sudo chmod +x mnt/$ARCH/etc/init.d/S99armiumOS mnt/$ARCH/root/armiumos_av_guard.py 2>/dev/null || true
+          done
+
+      - name: Configure Hybrid Bootloader
+        run: |
+          sudo mkdir -p mnt/boot/efi/EFI/BOOT
+          
+          cat << 'EOF' | sudo tee mnt/boot/efi/EFI/BOOT/grub.cfg
+          set timeout=2
+          set default=0
+
+          menuentry "armiumOS (Auto Hardware Detect)" {
+              if [ "$grub_cpu" = "arm64" ]; then
+                  echo "Booting armiumOS (Full ARM64 Mode)..."
+                  linux /boot/vmlinuz-arm64 root=/dev/sda2 subvol=arm64 rw quiet
+              else
+                  echo "Booting armiumOS Light (x86_64 Fallback Mode)..."
+                  linux /boot/vmlinuz-x86_64 root=/dev/sda2 subvol=x86_64 rw quiet
+              fi
+          }
+          EOF
+
+      - name: Package Image
+        run: |
+          sudo umount -R mnt/
+          LOOP=$(sudo losetup -j armiumos-disk.img | cut -d: -f1)
+          sudo losetup -d $LOOP
+          zip -9 armiumOS-1.2GB-Hybrid.zip armiumos-disk.img
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: armiumOS-1.2GB-Hybrid
+          path: armiumOS-1.2GB-Hybrid.zip
